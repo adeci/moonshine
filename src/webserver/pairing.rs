@@ -171,6 +171,13 @@ async fn get_server_cert(
 		notify
 	};
 
+	let mut guard = PairingGuard {
+		client_manager,
+		id: unique_id.clone(),
+		salt,
+		pin_received: false,
+	};
+
 	// Emit a notification, allowing the user to automatically open the PIN page.
 	if let Some(local_address) = local_address {
 		let pin_address = SocketAddr::new(local_address.ip(), http_port);
@@ -203,7 +210,7 @@ async fn get_server_cert(
 	}
 
 	tokio::select! {
-		_ = pin_notifier.notified() => {},
+		_ = pin_notifier.notified() => guard.pin_received = true,
 		_ = shutdown.wait_shutdown_triggered() => {
 			tracing::info!("Shutdown triggered, aborting pairing.");
 			return bad_request("Server is shutting down.".to_string());
@@ -211,6 +218,22 @@ async fn get_server_cert(
 	}
 
 	paired_xml_response(format!("<plaincert>{}</plaincert>", hex::encode(server_pem_str)))
+}
+
+/// Ends the pairing attempt if the request is dropped before the PIN arrives, e.g. when the client disconnects.
+struct PairingGuard<'a> {
+	client_manager: &'a ClientManager,
+	id: String,
+	salt: [u8; 16],
+	pin_received: bool,
+}
+
+impl Drop for PairingGuard<'_> {
+	fn drop(&mut self) {
+		if !self.pin_received {
+			let _ = self.client_manager.end_pairing(&self.id, &self.salt);
+		}
+	}
 }
 
 fn client_challenge(mut params: HashMap<String, String>, client_manager: &ClientManager) -> Response<Full<Bytes>> {
@@ -300,4 +323,67 @@ fn client_pairing_secret(mut params: HashMap<String, String>, client_manager: &C
 	}
 
 	paired_xml_response("")
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::SystemTime;
+
+	use super::*;
+
+	fn pending_client(id: &str, salt: u8) -> PendingClient {
+		PendingClient {
+			id: id.to_string(),
+			pem: String::new(),
+			salt: [salt; 16],
+			pin_notify: Arc::new(Notify::new()),
+			key: None,
+			server_secret: None,
+			server_challenge: None,
+			client_hash: None,
+			since: SystemTime::now(),
+		}
+	}
+
+	#[test]
+	fn pairing_guard_cleans_up_abandoned_attempt_and_keeps_newer_or_completed_ones() {
+		let dir = tempfile::tempdir().unwrap();
+		let manager = ClientManager::for_tests(dir.path().join("state.toml"));
+
+		// Dropped before receiving a PIN: removed immediately.
+		manager.start_pairing(pending_client("aaaa", 1)).unwrap();
+		{
+			let _guard = PairingGuard {
+				client_manager: &manager,
+				id: "aaaa".to_string(),
+				salt: [1; 16],
+				pin_received: false,
+			};
+		}
+		assert!(manager.pairing_requests().is_empty());
+
+		// Replaced by a newer attempt with a different salt: old guard leaves the newer attempt alone.
+		manager.start_pairing(pending_client("aaaa", 2)).unwrap();
+		manager.start_pairing(pending_client("aaaa", 3)).unwrap();
+		{
+			let _stale_guard = PairingGuard {
+				client_manager: &manager,
+				id: "aaaa".to_string(),
+				salt: [2; 16],
+				pin_received: false,
+			};
+		}
+		assert_eq!(manager.pairing_requests().len(), 1);
+
+		// Completed guard (PIN received): leaves the attempt intact.
+		{
+			let _completed_guard = PairingGuard {
+				client_manager: &manager,
+				id: "aaaa".to_string(),
+				salt: [3; 16],
+				pin_received: true,
+			};
+		}
+		assert_eq!(manager.pairing_requests().len(), 1);
+	}
 }

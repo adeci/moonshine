@@ -722,7 +722,11 @@ impl Webserver {
 		}
 	}
 
-	async fn unpair(&self, _params: HashMap<String, String>) -> Response<Full<Bytes>> {
+	async fn unpair(&self, params: HashMap<String, String>) -> Response<Full<Bytes>> {
+		// Moonlight unpairs when pairing fails, e.g. after a wrong PIN.
+		if let Some(unique_id) = params.get("uniqueid") {
+			let _ = self.client_manager.abort_pairing(unique_id);
+		}
 		let xml = r#"<root status_code="200"/>"#;
 		let mut response = Response::new(Full::new(Bytes::from(xml)));
 		response

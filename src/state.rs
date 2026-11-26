@@ -76,6 +76,15 @@ impl PersistentState {
 		Ok(state)
 	}
 
+	/// Fresh state backed by `path` (not written until `save()` is called).
+	#[cfg(test)]
+	pub(crate) fn for_tests(path: PathBuf) -> Self {
+		Self {
+			data: Arc::new(RwLock::new(StateData::new())),
+			path,
+		}
+	}
+
 	pub fn get_uuid(&self) -> Result<String, ()> {
 		let data = self
 			.data

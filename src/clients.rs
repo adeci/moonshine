@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -135,6 +136,16 @@ impl ClientManager {
 		})
 	}
 
+	#[cfg(test)]
+	pub(crate) fn for_tests(state_path: std::path::PathBuf) -> Self {
+		Self {
+			pending_clients: Default::default(),
+			state: PersistentState::for_tests(state_path),
+			server_cert_pem: String::new(),
+			server_private_key_pem: String::new(),
+		}
+	}
+
 	pub fn persistent_state(&self) -> &PersistentState {
 		&self.state
 	}
@@ -148,6 +159,29 @@ impl ClientManager {
 			tracing::error!("RwLock poisoned: {poison}");
 		})?;
 		inner.insert(pending_client.id.clone(), pending_client);
+		Ok(())
+	}
+
+	/// End a pairing attempt that will not complete, unless a newer one replaced it.
+	pub(crate) fn end_pairing(&self, id: &str, salt: &[u8; 16]) -> Result<(), ()> {
+		let mut inner = self.pending_clients.write().map_err(|poison| {
+			tracing::error!("RwLock poisoned: {poison}");
+		})?;
+		if inner.get(id).is_some_and(|client| client.salt == *salt) {
+			inner.remove(id);
+		}
+		Ok(())
+	}
+
+	/// End the attempt of a client that gave up after it got its PIN, e.g. because the PIN was wrong.
+	/// An attempt that still waits for its PIN is kept, as it may be of another client with the same id.
+	pub(crate) fn abort_pairing(&self, id: &str) -> Result<(), ()> {
+		let mut inner = self.pending_clients.write().map_err(|poison| {
+			tracing::error!("RwLock poisoned: {poison}");
+		})?;
+		if inner.get(id).is_some_and(|client| client.key.is_some()) {
+			inner.remove(id);
+		}
 		Ok(())
 	}
 
@@ -308,13 +342,22 @@ impl ClientManager {
 	}
 
 	pub(crate) fn check_client_pairing_secret(&self, id: &str, client_secret: Vec<u8>) -> Result<(), ()> {
-		let mut inner = self.pending_clients.write().map_err(|poison| {
-			tracing::error!("RwLock poisoned: {poison}");
-		})?;
-		let client = inner.get_mut(id).ok_or_else(|| {
-			tracing::warn!("No known client with id {id}");
-		})?;
-		verify_pairing_secret(client, client_secret)
+		let mut client = {
+			let mut inner = self.pending_clients.write().map_err(|poison| {
+				tracing::error!("RwLock poisoned: {poison}");
+			})?;
+			let Entry::Occupied(entry) = inner.entry(id.to_string()) else {
+				tracing::warn!("No known client with id {id}");
+				return Err(());
+			};
+			// Never remove an attempt that still waits for a PIN (another device may share this id).
+			if entry.get().key.is_none() {
+				tracing::warn!("Client {id} has not provided a PIN yet.");
+				return Err(());
+			}
+			entry.remove()
+		};
+		verify_pairing_secret(&mut client, client_secret)
 			.map_err(|e| tracing::warn!("Failed to verify client pairing secret: {e}"))?;
 
 		let fingerprint = cert_pem_fingerprint(&client.pem);
@@ -534,5 +577,61 @@ mod tests {
 	fn an_abandoned_request_no_longer_waits() {
 		let client = pending(SystemTime::now() - PAIRING_REQUEST_TIMEOUT - Duration::from_secs(1));
 		assert!(!client.waits_for_pin());
+	}
+
+	fn pending_with(id: &str, salt: u8) -> PendingClient {
+		PendingClient {
+			id: id.to_string(),
+			salt: [salt; 16],
+			..pending(SystemTime::now())
+		}
+	}
+
+	#[test]
+	fn ending_pairing_keeps_a_newer_attempt() {
+		let dir = tempfile::tempdir().unwrap();
+		let manager = ClientManager::for_tests(dir.path().join("state.toml"));
+		manager.start_pairing(pending_with("aaaa", 1)).unwrap();
+		manager.start_pairing(pending_with("aaaa", 2)).unwrap();
+
+		manager.end_pairing("aaaa", &[1; 16]).unwrap();
+		assert_eq!(manager.pairing_requests().len(), 1);
+
+		manager.end_pairing("aaaa", &[2; 16]).unwrap();
+		assert!(manager.pairing_requests().is_empty());
+	}
+
+	#[test]
+	fn failed_pairing_is_removed() {
+		let dir = tempfile::tempdir().unwrap();
+		let manager = ClientManager::for_tests(dir.path().join("state.toml"));
+		manager.start_pairing(pending_with("aaaa", 1)).unwrap();
+		manager.register_pin("aaaa", "1234").unwrap();
+
+		assert!(manager.check_client_pairing_secret("aaaa", vec![0; 32]).is_err());
+		assert!(manager.pending_clients.read().unwrap().is_empty());
+	}
+
+	#[test]
+	fn checking_pairing_secret_keeps_a_waiting_attempt() {
+		let dir = tempfile::tempdir().unwrap();
+		let manager = ClientManager::for_tests(dir.path().join("state.toml"));
+		manager.start_pairing(pending_with("aaaa", 1)).unwrap();
+
+		assert!(manager.check_client_pairing_secret("aaaa", vec![0; 32]).is_err());
+		assert_eq!(manager.pairing_requests().len(), 1);
+	}
+
+	#[test]
+	fn aborting_ends_only_an_attempt_with_a_pin() {
+		let dir = tempfile::tempdir().unwrap();
+		let manager = ClientManager::for_tests(dir.path().join("state.toml"));
+		manager.start_pairing(pending_with("aaaa", 1)).unwrap();
+		manager.abort_pairing("aaaa").unwrap();
+		assert_eq!(manager.pairing_requests().len(), 1);
+
+		manager.register_pin("aaaa", "1234").unwrap();
+		manager.abort_pairing("aaaa").unwrap();
+		assert!(manager.pending_clients.read().unwrap().is_empty());
 	}
 }
