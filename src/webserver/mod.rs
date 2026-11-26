@@ -597,6 +597,11 @@ impl Webserver {
 		};
 
 		let local_ip = local_address.map(|addr| addr.ip().to_string()).unwrap_or_default();
+		// Moonlight keeps the address it has when the host reports zeros; an empty one replaces it.
+		let mac_address = mac_address
+			.as_deref()
+			.filter(|mac| !mac.is_empty())
+			.unwrap_or("00:00:00:00:00:00");
 
 		// TODO: Check the use of some of these values, we leave most of them blank and Moonlight doesn't care.
 		let mut response = "<root status_code=\"200\">".to_string();
@@ -606,7 +611,7 @@ impl Webserver {
 		response += &format!("<uniqueid>{}</uniqueid>", self.unique_id);
 		response += &format!("<HttpsPort>{}</HttpsPort>", self.webserver_config.port_https);
 		response += &format!("<ExternalPort>{}</ExternalPort>", self.webserver_config.port);
-		response += &format!("<mac>{}</mac>", mac_address.unwrap_or("".to_string()));
+		response += &format!("<mac>{mac_address}</mac>");
 		response += "<MaxLumaPixelsHEVC>1869449984</MaxLumaPixelsHEVC>"; // TODO: Check if HEVC is supported, set this to 0 if it is not.
 		response += &format!("<LocalIP>{}</LocalIP>", escape_xml(local_ip));
 		let server_codec_mode_support = self.supported_codecs;
