@@ -43,6 +43,7 @@ mod pairing;
 
 /// Configuration for the embedded webserver.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WebserverConfig {
 	/// Port of the webserver.
 	pub port: u16,
@@ -51,7 +52,6 @@ pub struct WebserverConfig {
 	pub port_https: u16,
 
 	/// Whether to allow new clients to pair.
-	#[serde(default = "default_enable_pairing")]
 	pub enable_pairing: bool,
 
 	/// Path to the certificate for SSL encryption.
@@ -61,16 +61,12 @@ pub struct WebserverConfig {
 	pub private_key: PathBuf,
 }
 
-fn default_enable_pairing() -> bool {
-	true
-}
-
 impl Default for WebserverConfig {
 	fn default() -> Self {
 		Self {
 			port: 47989,
 			port_https: 47984,
-			enable_pairing: default_enable_pairing(),
+			enable_pairing: true,
 			certificate: "$HOME/.config/moonshine/cert.pem".into(),
 			private_key: "$HOME/.config/moonshine/key.pem".into(),
 		}

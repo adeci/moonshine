@@ -197,3 +197,27 @@ impl Default for Config {
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn partial_webserver_table_keeps_the_other_defaults() {
+		let defaults = WebserverConfig::default();
+
+		let config: Config = toml::from_str("[webserver]\nenable_pairing = false").unwrap();
+		assert!(!config.webserver.enable_pairing);
+		assert_eq!(config.webserver.port, defaults.port);
+		assert_eq!(config.webserver.port_https, defaults.port_https);
+		assert_eq!(config.webserver.certificate, defaults.certificate);
+		assert_eq!(config.webserver.private_key, defaults.private_key);
+
+		let config: Config = toml::from_str("[webserver]\nport = 12345").unwrap();
+		assert_eq!(config.webserver.port, 12345);
+		assert!(config.webserver.enable_pairing);
+		assert_eq!(config.webserver.port_https, defaults.port_https);
+		assert_eq!(config.webserver.certificate, defaults.certificate);
+		assert_eq!(config.webserver.private_key, defaults.private_key);
+	}
+}
