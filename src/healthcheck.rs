@@ -282,7 +282,9 @@ pub fn run_healthcheck(config: Option<&Config>, gpu: &GpuContext) -> HealthRepor
 
 	check_xwayland(&mut report);
 	check_xdg_runtime(&mut report);
-	check_inhibit(&mut report);
+	if config.is_none_or(|config| config.inhibit_sleep) {
+		check_inhibit(&mut report);
+	}
 	check_kcmp(&mut report);
 
 	// --- Ports (requires config) ---
