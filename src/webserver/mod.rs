@@ -636,20 +636,7 @@ impl Webserver {
 	}
 
 	fn pin(&self, params: HashMap<String, String>) -> Response<Full<Bytes>> {
-		let unique_id = params
-			.get("uniqueid")
-			.cloned()
-			.map(|id| {
-				id.chars()
-					.filter(|c| c.is_ascii_hexdigit())
-					.take(16)
-					.collect::<String>()
-			})
-			.filter(|id| !id.is_empty())
-			.unwrap_or_else(|| "0123456789ABCDEF".to_string());
-		let content = include_bytes!("../../assets/pin.html");
-		let html = String::from_utf8_lossy(content);
-		let html = html.replace("{{UNIQUE_ID}}", &unique_id);
+		let html = render_pin_page(params.get("uniqueid").map(String::as_str));
 		let mut response = Response::new(Full::new(Bytes::from(html)));
 		response.headers_mut().insert(
 			header::CONTENT_TYPE,
@@ -669,57 +656,7 @@ impl Webserver {
 			},
 		};
 
-		let params: HashMap<String, String> = url::form_urlencoded::parse(&body).into_owned().collect();
-
-		let pin = match params.get("pin") {
-			Some(pin) => pin,
-			None => {
-				tracing::warn!("Missing 'pin' in PIN submission.");
-				return bad_request("Bad request.".to_string());
-			},
-		};
-		if !crate::clients::is_valid_pin(pin) {
-			tracing::warn!("Received a PIN that is not 4 digits.");
-			return bad_request("The PIN must be the 4 digits that Moonlight shows.".to_string());
-		}
-
-		// Without a unique id, the PIN goes to the one request that waits for it. Moonlight clients
-		// all send the same unique id, so it rarely says which request a PIN is for.
-		let unique_id = match params.get("uniqueid") {
-			Some(unique_id) => unique_id.clone(),
-			None => match self.client_manager.pairing_requests().as_slice() {
-				[request] => request.id.clone(),
-				[] => {
-					tracing::warn!("Received a PIN, but no pairing request waits for one.");
-					return text_response(StatusCode::NOT_FOUND, "No pairing request waits for a PIN.");
-				},
-				_ => {
-					tracing::warn!("Received a PIN without a unique id, but several pairing requests wait for one.");
-					return text_response(
-						StatusCode::CONFLICT,
-						"Several pairing requests wait for a PIN; pass the uniqueid of one.",
-					);
-				},
-			},
-		};
-
-		let response = self.client_manager.register_pin(&unique_id, pin);
-		match response {
-			Ok(()) => {
-				tracing::info!("PIN registered successfully.");
-				match Response::builder()
-					.status(StatusCode::OK)
-					.body(Full::new(Bytes::from("PIN accepted.")))
-				{
-					Ok(response) => response,
-					Err(e) => {
-						tracing::warn!("Failed to create response: {e}");
-						bad_request("Bad request.".to_string())
-					},
-				}
-			},
-			Err(()) => bad_request("Failed to register PIN.".to_string()),
-		}
+		handle_pin_submission(&self.client_manager, &body)
 	}
 
 	async fn unpair(&self, _params: HashMap<String, String>) -> Response<Full<Bytes>> {
@@ -1172,6 +1109,75 @@ fn get_mac_address(address: IpAddr) -> Result<Option<String>, ()> {
 	Ok(None)
 }
 
+fn render_pin_page(unique_id: Option<&str>) -> String {
+	// Keep an explicit uniqueid (e.g. from the host notification); otherwise leave it blank so
+	// `/submit-pin` picks the waiting pairing request when the form is submitted.
+	let unique_id = unique_id
+		.map(|id| {
+			id.chars()
+				.filter(|c| c.is_ascii_hexdigit())
+				.take(16)
+				.collect::<String>()
+		})
+		.unwrap_or_default();
+	let content = include_bytes!("../../assets/pin.html");
+	String::from_utf8_lossy(content).replace("{{UNIQUE_ID}}", &unique_id)
+}
+
+fn handle_pin_submission(client_manager: &ClientManager, body: &[u8]) -> Response<Full<Bytes>> {
+	let params: HashMap<String, String> = url::form_urlencoded::parse(body).into_owned().collect();
+
+	let pin = match params.get("pin") {
+		Some(pin) => pin,
+		None => {
+			tracing::warn!("Missing 'pin' in PIN submission.");
+			return bad_request("Bad request.".to_string());
+		},
+	};
+	if !crate::clients::is_valid_pin(pin) {
+		tracing::warn!("Received a PIN that is not 4 digits.");
+		return bad_request("The PIN must be the 4 digits that Moonlight shows.".to_string());
+	}
+
+	// Without a unique id, the PIN goes to the one request that waits for it. Moonlight clients
+	// all send the same unique id, so it rarely says which request a PIN is for.
+	let unique_id = match params.get("uniqueid").filter(|id| !id.is_empty()) {
+		Some(unique_id) => unique_id.clone(),
+		None => match client_manager.pairing_requests().as_slice() {
+			[request] => request.id.clone(),
+			[] => {
+				tracing::warn!("Received a PIN, but no pairing request waits for one.");
+				return text_response(StatusCode::NOT_FOUND, "No pairing request waits for a PIN.");
+			},
+			_ => {
+				tracing::warn!("Received a PIN without a unique id, but several pairing requests wait for one.");
+				return text_response(
+					StatusCode::CONFLICT,
+					"Several pairing requests wait for a PIN; pass the uniqueid of one.",
+				);
+			},
+		},
+	};
+
+	let response = client_manager.register_pin(&unique_id, pin);
+	match response {
+		Ok(()) => {
+			tracing::info!("PIN registered successfully.");
+			match Response::builder()
+				.status(StatusCode::OK)
+				.body(Full::new(Bytes::from("PIN accepted.")))
+			{
+				Ok(response) => response,
+				Err(e) => {
+					tracing::warn!("Failed to create response: {e}");
+					bad_request("Bad request.".to_string())
+				},
+			}
+		},
+		Err(()) => bad_request("Failed to register PIN.".to_string()),
+	}
+}
+
 fn escape_xml(input: impl AsRef<str>) -> String {
 	input
 		.as_ref()
@@ -1180,4 +1186,92 @@ fn escape_xml(input: impl AsRef<str>) -> String {
 		.replace(">", "&gt;")
 		.replace("\"", "&quot;")
 		.replace("'", "&apos;")
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::SystemTime;
+
+	use tokio::sync::Notify;
+
+	use super::*;
+	use crate::clients::PendingClient;
+
+	fn pending_client(id: &str, salt: u8) -> PendingClient {
+		PendingClient {
+			id: id.to_string(),
+			pem: String::new(),
+			salt: [salt; 16],
+			pin_notify: Arc::new(Notify::new()),
+			key: None,
+			server_secret: None,
+			server_challenge: None,
+			client_hash: None,
+			since: SystemTime::now(),
+		}
+	}
+
+	#[test]
+	fn pin_page_leaves_uniqueid_blank_when_not_given() {
+		for input in [None, Some(""), Some("xyz!!!")] {
+			let html = render_pin_page(input);
+			assert!(html.contains(r#"<span id="uniqueid-value"></span>"#));
+			assert!(!html.contains("0123456789ABCDEF"));
+		}
+	}
+
+	#[test]
+	fn pin_page_keeps_explicit_hex_uniqueid() {
+		let html = render_pin_page(Some("8b71505ee14b66f8"));
+		assert!(html.contains(r#"<span id="uniqueid-value">8b71505ee14b66f8</span>"#));
+
+		let sanitized = render_pin_page(Some("8b71-505e-e14b-66f8-extra"));
+		assert!(sanitized.contains(r#"<span id="uniqueid-value">8b71505ee14b66f8</span>"#));
+	}
+
+	#[test]
+	fn submit_pin_resolves_waiting_client_when_uniqueid_is_omitted_or_empty() {
+		let dir = tempfile::tempdir().unwrap();
+		let manager = ClientManager::for_tests(dir.path().join("state.toml"));
+
+		assert_eq!(
+			handle_pin_submission(&manager, b"pin=1234").status(),
+			StatusCode::NOT_FOUND
+		);
+		assert_eq!(
+			handle_pin_submission(&manager, b"uniqueid=&pin=1234").status(),
+			StatusCode::NOT_FOUND
+		);
+
+		manager.start_pairing(pending_client("8b71505ee14b66f8", 1)).unwrap();
+		assert_eq!(
+			handle_pin_submission(&manager, b"uniqueid=&pin=1234").status(),
+			StatusCode::OK
+		);
+		assert!(manager.pairing_requests().is_empty());
+
+		manager.start_pairing(pending_client("deadbeef01234567", 2)).unwrap();
+		assert_eq!(handle_pin_submission(&manager, b"pin=5678").status(), StatusCode::OK);
+		assert!(manager.pairing_requests().is_empty());
+	}
+
+	#[test]
+	fn submit_pin_conflicts_on_empty_uniqueid_with_multiple_waiters_but_accepts_explicit_id() {
+		let dir = tempfile::tempdir().unwrap();
+		let manager = ClientManager::for_tests(dir.path().join("state.toml"));
+
+		manager.start_pairing(pending_client("aaaa", 1)).unwrap();
+		manager.start_pairing(pending_client("bbbb", 2)).unwrap();
+
+		assert_eq!(
+			handle_pin_submission(&manager, b"uniqueid=&pin=1234").status(),
+			StatusCode::CONFLICT
+		);
+		assert_eq!(
+			handle_pin_submission(&manager, b"uniqueid=aaaa&pin=1234").status(),
+			StatusCode::OK
+		);
+		assert_eq!(manager.pairing_requests().len(), 1);
+		assert_eq!(manager.pairing_requests()[0].id, "bbbb");
+	}
 }

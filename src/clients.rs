@@ -135,6 +135,16 @@ impl ClientManager {
 		})
 	}
 
+	#[cfg(test)]
+	pub(crate) fn for_tests(state_path: std::path::PathBuf) -> Self {
+		Self {
+			pending_clients: Default::default(),
+			state: PersistentState::for_tests(state_path),
+			server_cert_pem: String::new(),
+			server_private_key_pem: String::new(),
+		}
+	}
+
 	pub fn persistent_state(&self) -> &PersistentState {
 		&self.state
 	}

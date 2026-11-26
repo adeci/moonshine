@@ -26,6 +26,11 @@
 			padding: 2rem;
 			border-radius: 8px;
 			box-shadow: 0 0 20px rgba(0, 0, 0, 0.3);
+			max-width: 24rem;
+		}
+
+		#uniqueid-display:has(#uniqueid-value:empty) {
+			display: none;
 		}
 
 		#pin-instructions {
@@ -110,7 +115,7 @@
 		</form>
 
 		<div id="error-message">Error submitting PIN. Please try again or check the server logs.</div>
-		<div id="success-message">Successfully paired.</div>
+		<div id="success-message">PIN sent. Moonlight finishes pairing. If the PIN was wrong, Moonlight shows an error.</div>
 	</div>
 
 	<script>
@@ -120,28 +125,66 @@
 		const submit_button = document.getElementById("submit");
 		const error_message = document.getElementById("error-message");
 		const success_message = document.getElementById("success-message");
+		const uniqueid_display = document.getElementById("uniqueid-display");
+		const uniqueid = document.getElementById("uniqueid-value").textContent.trim();
+		const default_error = error_message.textContent;
+		let submitting = false;
+
+		if (!uniqueid) {
+			uniqueid_display.style.display = "none";
+		}
+
+		function update_submit_button() {
+			let complete = true;
+			for (const field of pin_fields) {
+				if (field.value === "") {
+					complete = false;
+					break;
+				}
+			}
+			submit_button.disabled = submitting || !complete;
+		}
 
 		pin_form.addEventListener("submit", async (event) => {
 			event.preventDefault();
+			if (submitting) {
+				return;
+			}
+			submitting = true;
+			update_submit_button();
+			error_message.style.display = "none";
+			success_message.style.display = "none";
 
 			let pin = "";
 			for (const field of pin_fields) {
 				pin += field.value;
 			}
 
-			const uniqueid = document.getElementById("uniqueid-value").textContent.trim();
-			const response = await fetch('/submit-pin', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-				body: `uniqueid=${uniqueid}&pin=${pin}`
-			});
+			const body = new URLSearchParams({ pin });
+			if (uniqueid) {
+				body.set("uniqueid", uniqueid);
+			}
 
-			if (response.ok) {
-				error_message.style.display = "none";
-				success_message.style.display = "block";
-			} else {
+			try {
+				const response = await fetch('/submit-pin', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+					body: body.toString()
+				});
+
+				if (response.ok) {
+					success_message.style.display = "block";
+				} else {
+					const text = (await response.text()).trim();
+					error_message.textContent = text || default_error;
+					error_message.style.display = "block";
+				}
+			} catch (_e) {
+				error_message.textContent = default_error;
 				error_message.style.display = "block";
-				success_message.style.display = "none";
+			} finally {
+				submitting = false;
+				update_submit_button();
 			}
 		});
 
@@ -158,13 +201,7 @@
 					}
 				}
 
-				let disabled = false;
-				for (const field of pin_fields) {
-					if (field.value === "") {
-						disabled = true;
-					}
-				}
-				submit_button.disabled = disabled;
+				update_submit_button();
 			});
 		}
 	</script>
